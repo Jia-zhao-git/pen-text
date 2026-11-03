@@ -1,10 +1,10 @@
 <template>
-    <div class="rd-page" :style="pageStyle">
+    <div class="rd-page">
 
         <!-- 顶栏：沉浸式，默认隐藏，点击屏幕中间显示 -->
-        <div v-if="showBars" class="rd-top" :style="barStyle">
+        <div v-if="showBars" class="rd-top">
             <div class="rd-chip" @click="backToLibrary"><text class="rd-chiptxt">书架</text></div>
-            <text class="rd-title" :style="titleStyle">{{ title }}</text>
+            <text class="rd-title">{{ title }}</text>
             <text class="rd-progress">{{ progressText }}</text>
             <div class="rd-chip" @click="openSettings"><text class="rd-chiptxt">设置</text></div>
         </div>
@@ -27,7 +27,7 @@
         </scroller>
 
         <!-- 底栏：沉浸式，默认隐藏 -->
-        <div v-if="showBars" class="rd-foot" :style="barStyle">
+        <div v-if="showBars" class="rd-foot">
             <div class="rd-chip" @click="backToLibrary"><text class="rd-chiptxt">书架</text></div>
             <div class="rd-chip" @click="scrollToTop"><text class="rd-chiptxt">回顶部</text></div>
             <text class="rd-pageinfo">{{ pageInfo }}</text>
@@ -45,7 +45,6 @@ import { renderPage, normalizeText, progressPercent } from '../../lib/text.js'
 import { titleFromName } from '../../lib/book.js'
 import { subscribeOpen, consumeOpen } from '../../lib/session.js'
 import { saveBookProgress, loadLibrary } from '../../services/store.js'
-import { subscribeUiState } from '../../lib/uistate.js'
 import { openReader, readChunk, chunkIndexForLine, lineStartOfChunk } from '../../services/reader.js'
 
 const INITIAL_CHUNKS = 2
@@ -71,9 +70,7 @@ export default {
             // 自动滚动：逐页 scrollToElement，autoPage 是当前目标页索引
             autoScroll: false,
             autoTimer: null,
-            autoPage: 0,
-            // 主题配色（data 字段，避免 computed 访问问题）
-            themeColors: { bg: '#16161a', text: '#d8d8e0', bar: '#1e1e24', title: '#e8e8ee' }
+            autoPage: 0
         }
     },
     computed: {
@@ -91,18 +88,8 @@ export default {
             const s = this.settings || {}
             return {
                 fontSize: (s.fontSize || 24) + 'px',
-                lineHeight: (s.lineHeight || 26) + 'px',
-                color: this.themeColors.text
+                lineHeight: (s.lineHeight || 26) + 'px'
             }
-        },
-        pageStyle() {
-            return { backgroundColor: this.themeColors.bg }
-        },
-        barStyle() {
-            return { backgroundColor: this.themeColors.bar }
-        },
-        titleStyle() {
-            return { color: this.themeColors.title }
         },
         autoScrollLabel() {
             return this.autoScroll ? '停止滚动' : '自动滚动'
@@ -116,15 +103,10 @@ export default {
         this.unsubOpen = subscribeOpen((path) => {
             if (path) this.openBook(path)
         })
-        // 订阅设置广播：设置页改字号/主题后立即生效（固件返回不触发 onShow）
-        this.unsubUi = subscribeUiState((s) => {
-            if (s && s.settings) this.applySettings(s.settings)
-        })
         this.boot()
     },
     unmounted() {
         if (this.unsubOpen) { this.unsubOpen(); this.unsubOpen = null }
-        if (this.unsubUi) { this.unsubUi(); this.unsubUi = null }
         this.stopAutoScroll()
         if (this.hideTimer) clearTimeout(this.hideTimer)
     },
@@ -137,7 +119,6 @@ export default {
     methods: {
         async boot() {
             this.settings = await loadSettings()
-            this.applyTheme()
             const target = consumeOpen()
             if (target) {
                 await this.openBook(target)
@@ -153,8 +134,7 @@ export default {
             if (!s) return
             this.applySettings(s)
         },
-        // 应用新设置：字号/行高/每行字数/每页行数/缩进变化需要重新分页；
-        // 主题变化只需重渲染。
+        // 应用新设置：字号/行高/每行字数/每页行数/缩进变化需要重新分页。
         applySettings(s) {
             const old = this.settings
             const relayout = !old ||
@@ -164,17 +144,9 @@ export default {
                 s.linesPerPage !== old.linesPerPage ||
                 s.indent !== old.indent
             this.settings = s
-            this.applyTheme()
             if (relayout && this.book) {
                 this.resetReader(this.progressChunk, this.progressOffset)
             }
-        },
-        // 根据 settings.theme 更新 themeColors（data 字段，非 computed，避免访问问题）
-        applyTheme() {
-            const t = (this.settings && this.settings.theme) || 'dark'
-            if (t === 'light') this.themeColors = { bg: '#f4f2ea', text: '#3a3a3a', bar: '#e8e4d8', title: '#5a5a5a' }
-            else if (t === 'sepia') this.themeColors = { bg: '#f0e6d2', text: '#5b4636', bar: '#e2d6bc', title: '#6b5544' }
-            else this.themeColors = { bg: '#16161a', text: '#d8d8e0', bar: '#1e1e24', title: '#e8e8ee' }
         },
         async openBook(path, fromChunk, fromOffset) {
             this.loading = true
