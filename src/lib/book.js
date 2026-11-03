@@ -36,6 +36,9 @@ export function normalizeLibrary(arr) {
       addedAt: Number(b.addedAt) || 0,
       progress: Number(b.progress) || 0,
       totalChars: Number(b.totalChars) || 0,
+      totalLines: Number(b.totalLines) || 0,
+      chunkCount: Number(b.chunkCount) || 0,
+      progressChunk: Number(b.progressChunk) || 0,
       updatedAt: Number(b.updatedAt) || 0
     })
   }
@@ -44,16 +47,21 @@ export function normalizeLibrary(arr) {
 }
 
 // 更新单本书的进度 / 总字数，返回新的书架（不修改入参）。
+// 按 path 匹配（path 是稳定唯一键）：调用方不一定知道 id（例如只拿文件路径存
+// 进度时），按 id 匹配会因为 id 为空而永远匹配不到，导致重复新增 + 被归一化
+// 过滤，进度静默丢失。这里以 path 为准，id 缺失则保留原 id 或新生成。
 export function upsertBook(library, patch) {
   const list = normalizeLibrary(library)
-  const idx = list.findIndex((b) => b.id === patch.id)
+  const idx = list.findIndex((b) => b.path === patch.path)
+  const id = patch.id || (idx >= 0 ? list[idx].id : newBookId())
+  const merged = Object.assign({
+    id: id, name: '', path: '', addedAt: Date.now(),
+    progress: 0, totalChars: 0, updatedAt: Date.now()
+  }, patch, { id: id })
   if (idx >= 0) {
-    list[idx] = Object.assign({}, list[idx], patch)
+    list[idx] = Object.assign({}, list[idx], merged)
   } else {
-    list.unshift(Object.assign({
-      id: newBookId(), name: '', path: '', addedAt: Date.now(),
-      progress: 0, totalChars: 0, updatedAt: Date.now()
-    }, patch))
+    list.unshift(merged)
   }
   return list
 }

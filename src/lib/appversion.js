@@ -1,2 +1,4 @@
 // 应用版本号：由 scripts/bump.js 自动写入，不要手改。
-export const APP_VERSION = '0.1.0'
+// 单独放一个文件是因为运行期拿不到 package.json（包里没有），而日志里必须能看出
+// 用户装的是哪一版 —— 否则「0.1.9 有这个问题、0.1.11 修了」这类判断无从谈起。
+export const APP_VERSION = '0.1.16'

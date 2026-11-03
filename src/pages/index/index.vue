@@ -1,27 +1,38 @@
 <template>
-    <div class="rd-page">
+    <div class="rd-page" :style="pageStyle">
 
-        <!-- 顶栏：书名 + 进度 + 返回书架 / 设置 -->
-        <div class="rd-top">
+        <!-- 顶栏：沉浸式，默认隐藏，点击屏幕中间显示 -->
+        <div v-if="showBars" class="rd-top" :style="barStyle">
             <div class="rd-chip" @click="backToLibrary"><text class="rd-chiptxt">书架</text></div>
-            <text class="rd-title">{{ title }}</text>
+            <text class="rd-title" :style="titleStyle">{{ title }}</text>
             <text class="rd-progress">{{ progressText }}</text>
             <div class="rd-chip" @click="openSettings"><text class="rd-chiptxt">设置</text></div>
         </div>
 
-        <!-- 正文区：当前页文本，顶部对齐，flex 自然换行由分页器保证不越界 -->
-        <div class="rd-body">
-            <text v-if="!book" class="rd-empty">还没有打开任何书\n点左上角「书架」选择或导入</text>
-            <text v-else-if="loading" class="rd-empty">加载中…</text>
-            <text v-else-if="loadError" class="rd-empty">{{ loadError }}</text>
-            <text v-else class="rd-text" :style="textStyle">{{ pageText }}</text>
-        </div>
+        <!-- 正文区：滚动连续阅读。滚到底自动加载下一块。 -->
+        <scroller ref="scroller" class="rd-scroll" scroll-direction="vertical" @scroll="onScroll">
+            <div class="rd-content" ref="top" @click="toggleBars">
+                <text v-if="!book" class="rd-empty">还没有打开任何书\n点左上角「书架」选择或导入</text>
+                <text v-else-if="loading" class="rd-empty">加载中…</text>
+                <text v-else-if="loadError" class="rd-empty">{{ loadError }}</text>
 
-        <!-- 底部：翻页 + 提示 -->
-        <div class="rd-foot">
-            <div :class="prevClass" @click="prevPage"><text :class="prevTxtClass">上一页</text></div>
+                <div v-else @click="toggleBars">
+                    <div v-for="(p, pi) in renderedPages" :key="pi" class="rd-pageblock" :ref="'pb_' + pi">
+                        <text class="rd-text" :style="textStyle">{{ p.text }}</text>
+                    </div>
+                    <text v-if="loadingMore" class="rd-loading">加载中…</text>
+                    <text v-if="atEnd" class="rd-end">— 已到末尾 —</text>
+                </div>
+            </div>
+        </scroller>
+
+        <!-- 底栏：沉浸式，默认隐藏 -->
+        <div v-if="showBars" class="rd-foot" :style="barStyle">
+            <div class="rd-chip" @click="backToLibrary"><text class="rd-chiptxt">书架</text></div>
+            <div class="rd-chip" @click="scrollToTop"><text class="rd-chiptxt">回顶部</text></div>
             <text class="rd-pageinfo">{{ pageInfo }}</text>
-            <div :class="nextClass" @click="nextPage"><text :class="nextTxtClass">下一页</text></div>
+            <div :class="autoScrollClass" @click="toggleAutoScroll"><text class="rd-chiptxt">{{ autoScrollLabel }}</text></div>
+            <div class="rd-chip" @click="openSettings"><text class="rd-chiptxt">设置</text></div>
         </div>
 
     </div>
@@ -29,116 +40,157 @@
 
 <script>
 import { loadSettings } from '../../services/store.js'
-import { listBooks } from '../../services/books.js'
-import { readText, navTo, log } from '../../services/platform.js'
-import { paginate, locatePage, progressPercent } from '../../lib/text.js'
+import { navTo, log } from '../../services/platform.js'
+import { renderPage, normalizeText, progressPercent } from '../../lib/text.js'
 import { titleFromName } from '../../lib/book.js'
-import { requestOpen, consumeOpen } from '../../lib/session.js'
+import { subscribeOpen, consumeOpen } from '../../lib/session.js'
 import { saveBookProgress, loadLibrary } from '../../services/store.js'
+import { subscribeUiState } from '../../lib/uistate.js'
+import { openReader, readChunk, chunkIndexForLine, lineStartOfChunk } from '../../services/reader.js'
+
+const INITIAL_CHUNKS = 2
 
 export default {
     name: 'index',
     data() {
         return {
-            book: null,        // { path, name, totalChars }
+            book: null,
             settings: null,
-            raw: '',           // 全书文本（缓存，翻页不重复读盘）
-            pages: [],
-            pageIdx: 0,
+            renderedPages: [],   // [{ chunkIdx, start, text }]，start 是块内字符偏移
+            nextChunkIdx: 0,
             loading: false,
-            loadError: ''
+            loadingMore: false,
+            atEnd: false,
+            loadError: '',
+            // 进度：块索引 + 块内字符偏移（页级精确，不跨块累加）
+            progressChunk: 0,
+            progressOffset: 0,
+            // 沉浸式 UI
+            showBars: false,
+            hideTimer: null,
+            // 自动滚动：逐页 scrollToElement，autoPage 是当前目标页索引
+            autoScroll: false,
+            autoTimer: null,
+            autoPage: 0,
+            // 主题配色（data 字段，避免 computed 访问问题）
+            themeColors: { bg: '#16161a', text: '#d8d8e0', bar: '#1e1e24', title: '#e8e8ee' }
         }
     },
     computed: {
         title() {
             return this.book ? this.book.name : 'pen-text'
         },
-        pageText() {
-            return this.pages.length ? this.pages[this.pageIdx].text : ''
-        },
         pageInfo() {
-            if (!this.pages.length) return ''
-            return (this.pageIdx + 1) + ' / ' + this.pages.length
+            if (!this.book || !this.book.chunkCount) return ''
+            return '已读 ' + progressPercent(this.progressChunk, this.book.chunkCount) + '%'
         },
         progressText() {
-            if (!this.book || !this.book.totalChars) return ''
-            const cur = this.pages.length ? this.pages[this.pageIdx].start : 0
-            return '已读 ' + progressPercent(cur, this.book.totalChars) + '%'
+            return this.pageInfo
         },
         textStyle() {
             const s = this.settings || {}
             return {
                 fontSize: (s.fontSize || 24) + 'px',
-                lineHeight: (s.lineHeight || 26) + 'px'
+                lineHeight: (s.lineHeight || 26) + 'px',
+                color: this.themeColors.text
             }
         },
-        prevClass() {
-            return this.pageIdx > 0 ? 'rd-btn' : 'rd-btn-off'
+        pageStyle() {
+            return { backgroundColor: this.themeColors.bg }
         },
-        prevTxtClass() {
-            return this.pageIdx > 0 ? 'rd-btntxt' : 'rd-btntxt-off'
+        barStyle() {
+            return { backgroundColor: this.themeColors.bar }
         },
-        nextClass() {
-            return this.pageIdx < this.pages.length - 1 ? 'rd-btn' : 'rd-btn-off'
+        titleStyle() {
+            return { color: this.themeColors.title }
         },
-        nextTxtClass() {
-            return this.pageIdx < this.pages.length - 1 ? 'rd-btntxt' : 'rd-btntxt-off'
+        autoScrollLabel() {
+            return this.autoScroll ? '停止滚动' : '自动滚动'
+        },
+        autoScrollClass() {
+            return this.autoScroll ? 'rd-chip rd-chip-on' : 'rd-chip'
         }
     },
     mounted() {
         this.settings = null
+        this.unsubOpen = subscribeOpen((path) => {
+            if (path) this.openBook(path)
+        })
+        // 订阅设置广播：设置页改字号/主题后立即生效（固件返回不触发 onShow）
+        this.unsubUi = subscribeUiState((s) => {
+            if (s && s.settings) this.applySettings(s.settings)
+        })
         this.boot()
     },
+    unmounted() {
+        if (this.unsubOpen) { this.unsubOpen(); this.unsubOpen = null }
+        if (this.unsubUi) { this.unsubUi(); this.unsubUi = null }
+        this.stopAutoScroll()
+        if (this.hideTimer) clearTimeout(this.hideTimer)
+    },
     onShow() {
-        // 从设置页返回：字号/行高变了要重新分页，用旧偏移定位回当前阅读位置。
-        // 注意：本固件从子页面返回不触发 onShow（参考项目实测结论），所以设置页
-        // 改完会直接广播，这里只在确实触发时兜底重读。
         this.reloadSettings()
+    },
+    onHide() {
+        this.saveProgress()
     },
     methods: {
         async boot() {
             this.settings = await loadSettings()
+            this.applyTheme()
             const target = consumeOpen()
             if (target) {
                 await this.openBook(target)
                 return
             }
-            // 没有待打开的书：恢复上次读的那本（书架里 updatedAt 最新的）
             const lib = await loadLibrary()
             if (lib.length) {
-                await this.openBook(lib[0].path)
-                this.seekTo(lib[0].progress)
+                await this.openBook(lib[0].path, lib[0].progressChunk, lib[0].progress)
             }
         },
         async reloadSettings() {
             const s = await loadSettings()
             if (!s) return
-            const changed = !this.settings ||
-                s.fontSize !== this.settings.fontSize ||
-                s.lineHeight !== this.settings.lineHeight ||
-                s.charsPerLine !== this.settings.charsPerLine ||
-                s.linesPerPage !== this.settings.linesPerPage ||
-                s.indent !== this.settings.indent
-            this.settings = s
-            if (changed && this.raw) this.repaginate()
+            this.applySettings(s)
         },
-        async openBook(path) {
+        // 应用新设置：字号/行高/每行字数/每页行数/缩进变化需要重新分页；
+        // 主题变化只需重渲染。
+        applySettings(s) {
+            const old = this.settings
+            const relayout = !old ||
+                s.fontSize !== old.fontSize ||
+                s.lineHeight !== old.lineHeight ||
+                s.charsPerLine !== old.charsPerLine ||
+                s.linesPerPage !== old.linesPerPage ||
+                s.indent !== old.indent
+            this.settings = s
+            this.applyTheme()
+            if (relayout && this.book) {
+                this.resetReader(this.progressChunk, this.progressOffset)
+            }
+        },
+        // 根据 settings.theme 更新 themeColors（data 字段，非 computed，避免访问问题）
+        applyTheme() {
+            const t = (this.settings && this.settings.theme) || 'dark'
+            if (t === 'light') this.themeColors = { bg: '#f4f2ea', text: '#3a3a3a', bar: '#e8e4d8', title: '#5a5a5a' }
+            else if (t === 'sepia') this.themeColors = { bg: '#f0e6d2', text: '#5b4636', bar: '#e2d6bc', title: '#6b5544' }
+            else this.themeColors = { bg: '#16161a', text: '#d8d8e0', bar: '#1e1e24', title: '#e8e8ee' }
+        },
+        async openBook(path, fromChunk, fromOffset) {
             this.loading = true
             this.loadError = ''
             try {
-                const text = await readText(path, 3)
-                if (text === null || text === undefined) {
-                    this.loadError = '读取失败：文件可能已不存在\n请回书架重新选择'
+                const book = await openReader(path)
+                if (!book || !book.chunkCount) {
+                    this.loadError = '读取失败：文件无法切块\n请回书架重新选择'
                     this.loading = false
                     return
                 }
-                this.raw = text
-                this.book = {
-                    path: path,
-                    name: titleFromName(path),
-                    totalChars: text.length
-                }
-                this.repaginate()
+                book.name = titleFromName(path)
+                this.book = book
+                const chunk = Number(fromChunk) || 0
+                const offset = Number(fromOffset) || 0
+                await this.resetReader(chunk, offset)
                 this.saveProgress()
             } catch (e) {
                 this.loadError = '读取失败：' + ((e && e.message) || e)
@@ -146,41 +198,239 @@ export default {
                 this.loading = false
             }
         },
-        repaginate() {
+        // 从某块 + 块内偏移开始，重置渲染窗口
+        async resetReader(fromChunk, fromOffset) {
             const s = this.settings || {}
-            this.pages = paginate(this.raw, {
+            const opts = {
                 charsPerLine: s.charsPerLine,
                 linesPerPage: s.linesPerPage,
                 indent: s.indent
-            })
-            this.pageIdx = 0
+            }
+            this.renderedPages = []
+            this.atEnd = false
+            this.loading = false
+
+            let startChunk = Math.max(0, Math.min(fromChunk, this.book.chunkCount - 1))
+            this.nextChunkIdx = startChunk
+            this.progressChunk = startChunk
+            this.progressOffset = fromOffset || 0
+
+            const loadCount = Math.min(INITIAL_CHUNKS, this.book.chunkCount - startChunk)
+            for (let i = 0; i < loadCount; i++) {
+                const idx = startChunk + i
+                const text = await readChunk(this.book, idx)
+                if (text === null || text === undefined) continue
+                // 只有起始块需要从 fromOffset 开始，后续块从 0 开始
+                const startAt = (idx === startChunk) ? (fromOffset || 0) : 0
+                this.appendChunkPages(text, idx, startAt, opts)
+                this.nextChunkIdx = idx + 1
+            }
+            this.atEnd = this.nextChunkIdx >= this.book.chunkCount
             this.loading = false
         },
-        seekTo(offset) {
-            if (!this.pages.length) return
-            this.pageIdx = locatePage(this.pages, offset)
+        // 把一块文本从 startAt 偏移起分页，追加到渲染窗口
+        appendChunkPages(text, chunkIdx, startAt, opts) {
+            const s = this.settings || {}
+            const o = opts || {
+                charsPerLine: s.charsPerLine,
+                linesPerPage: s.linesPerPage,
+                indent: s.indent
+            }
+            const chunkText = normalizeText(text)
+            let offset = startAt || 0
+            let guard = 0
+            while (offset < chunkText.length && guard < 10000) {
+                const p = renderPage(chunkText, Object.assign({ from: offset }, o))
+                if (!p.text && !p.hasNext) break
+                this.renderedPages.push({ chunkIdx: chunkIdx, start: p.start, text: p.text })
+                offset = p.end
+                if (!p.hasNext) break
+                guard++
+            }
         },
-        prevPage() {
-            if (this.pageIdx <= 0) return
-            this.pageIdx--
-            this.saveProgress()
+        async appendNext() {
+            if (this.atEnd || this.loadingMore || !this.book) return
+            this.loadingMore = true
+            try {
+                const idx = this.nextChunkIdx
+                if (idx >= this.book.chunkCount) {
+                    this.atEnd = true
+                    this.loadingMore = false
+                    return
+                }
+                const text = await readChunk(this.book, idx)
+                if (text !== null && text !== undefined) {
+                    this.appendChunkPages(text, idx, 0, null)
+                }
+                this.nextChunkIdx = idx + 1
+                this.atEnd = this.nextChunkIdx >= this.book.chunkCount
+            } catch (e) {
+                log('appendNext 失败 ' + (e && e.message ? e.message : e))
+            } finally {
+                this.loadingMore = false
+            }
         },
-        nextPage() {
-            if (this.pageIdx >= this.pages.length - 1) return
-            this.pageIdx++
-            this.saveProgress()
+        // 滚动事件：接近底部就追加下一块；同时用滚动偏移精确映射当前页作为进度。
+        onScroll(e) {
+            const offsetY = e && e.contentOffset ? Math.abs(e.contentOffset.y || 0) : 0
+            const size = e && e.contentSize ? e.contentSize.height : 0
+            if (this.atEnd === false && size > 0 && offsetY + 320 >= size) {
+                this.appendNext()
+            }
+            this.trackVisiblePage(offsetY)
+        },
+        // 页高是确定性的：每页固定 linesPerPage 行 × lineHeight，加固定页间距。
+        // 用「滚动偏移 ÷ 页高」精确算出当前可视页，作为进度（不再用预加载的最远页）。
+        trackVisiblePage(offsetY) {
+            if (!this.renderedPages.length) return
+            const s = this.settings || {}
+            const lineH = s.lineHeight || 26
+            const lines = s.linesPerPage || 10
+            const gap = 14
+            const pageH = lineH * lines + gap
+            // 可视区顶部落在哪个页块（offsetY 是相对内容顶的滚动量）
+            let idx = Math.floor((offsetY + pageH * 0.5) / pageH)
+            if (idx < 0) idx = 0
+            if (idx >= this.renderedPages.length) idx = this.renderedPages.length - 1
+            const page = this.renderedPages[idx]
+            if (!page) return
+            // 只在真正前进时更新（单调，避免回滚写 data）
+            if (page.chunkIdx !== this.progressChunk || page.start !== this.progressOffset) {
+                this.progressChunk = page.chunkIdx
+                this.progressOffset = page.start
+            }
         },
         saveProgress() {
-            if (!this.book || !this.pages.length) return
-            const offset = this.pages[this.pageIdx].start
+            if (!this.book) return
             saveBookProgress({
-                id: '', // 由 store 内部 upsert 决定，path 匹配到即更新
+                id: '',
                 path: this.book.path,
                 name: this.book.name,
                 totalChars: this.book.totalChars,
-                progress: offset,
+                totalLines: this.book.totalLines,
+                chunkCount: this.book.chunkCount,
+                progressChunk: this.progressChunk,
+                progress: this.progressOffset,
                 updatedAt: Date.now()
             })
+        },
+        // ---------- 沉浸式 UI ----------
+        toggleBars() {
+            this.showBars = !this.showBars
+            if (this.showBars) {
+                this.scheduleHide()
+            } else if (this.hideTimer) {
+                clearTimeout(this.hideTimer)
+                this.hideTimer = null
+            }
+        },
+        scheduleHide() {
+            if (this.hideTimer) clearTimeout(this.hideTimer)
+            this.hideTimer = setTimeout(() => {
+                this.showBars = false
+                this.hideTimer = null
+            }, 3000)
+        },
+        // ---------- 自动滚动 ----------
+        toggleAutoScroll() {
+            if (this.autoScroll) {
+                this.stopAutoScroll()
+            } else {
+                this.startAutoScroll()
+            }
+        },
+        startAutoScroll() {
+            this.autoScroll = true
+            this.scheduleHide()
+            // 探测 scroller 实例是否支持 scrollTop 像素滚动
+            this._pixelScroll = this.probeScrollTop()
+            const self = this
+            // 像素滚动用中等帧率小步进；逐页回退用慢节奏
+            const interval = this._pixelScroll ? 100 : 900
+            this.autoTimer = setInterval(() => {
+                self.autoScrollTick()
+            }, interval)
+        },
+        probeScrollTop() {
+            try {
+                const sc = this.$refs.scroller
+                // 组件实例或其 $el 上找 scrollTop
+                const inst = sc && sc.$el ? sc.$el : sc
+                return inst && (typeof inst.scrollTop === 'number' || inst.scrollTop !== undefined)
+            } catch (e) { return false }
+        },
+        autoScrollTick() {
+            if (!this.autoScroll) return
+            if (this._pixelScroll) {
+                this.pixelScrollStep()
+            } else {
+                this.pageScrollStep()
+            }
+        },
+        // 像素平滑滚动：直接递增 scrollTop（每 tick 2px，50ms → 40px/s）
+        pixelScrollStep() {
+            try {
+                const sc = this.$refs.scroller
+                const inst = sc && sc.$el ? sc.$el : sc
+                if (!inst || typeof inst.scrollTop !== 'number') {
+                    this._pixelScroll = false
+                    return
+                }
+                inst.scrollTop = inst.scrollTop + 1
+                // 到底就加载下一块
+                if (this.atEnd === false && inst.scrollTop + 340 >= inst.scrollHeight) {
+                    this.appendNext()
+                }
+                // 真到末尾（无更多块且滚到底）停止
+                if (this.atEnd && inst.scrollTop + 20 >= inst.scrollHeight) {
+                    this.stopAutoScroll()
+                }
+                // 同步进度到当前可视页
+                this.trackVisiblePage(inst.scrollTop)
+            } catch (e) { /* 忽略 */ }
+        },
+        // 逐页回退：滚到下一个 pageblock
+        pageScrollStep() {
+            if (this.autoPage >= this.renderedPages.length - 1) {
+                if (this.atEnd) {
+                    this.stopAutoScroll()
+                    return
+                }
+                this.appendNext()
+                return
+            }
+            this.autoPage++
+            this.scrollToPage(this.autoPage)
+            const page = this.renderedPages[this.autoPage]
+            if (page) {
+                this.progressChunk = page.chunkIdx
+                this.progressOffset = page.start
+            }
+            this.saveProgress()
+        },
+        scrollToPage(index) {
+            try {
+                const refs = this.$refs['pb_' + index]
+                const el = Array.isArray(refs) ? refs[0] : refs
+                if (el && this.$page && this.$page.$dom && this.$page.$dom.scrollToElement) {
+                    this.$page.$dom.scrollToElement(el, { offset: 0, animated: true })
+                }
+            } catch (e) { /* 忽略 */ }
+        },
+        stopAutoScroll() {
+            this.autoScroll = false
+            if (this.autoTimer) {
+                clearInterval(this.autoTimer)
+                this.autoTimer = null
+            }
+        },
+        scrollToTop() {
+            try {
+                const el = this.$refs.top
+                if (el && this.$page && this.$page.$dom && this.$page.$dom.scrollToElement) {
+                    this.$page.$dom.scrollToElement(el)
+                }
+            } catch (e) { /* 忽略 */ }
         },
         backToLibrary() {
             this.saveProgress()
@@ -209,6 +459,11 @@ export default {
     padding-left: 12px;
     padding-right: 12px;
     background-color: #1e1e24;
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 10;
 }
 
 .rd-chip {
@@ -219,6 +474,16 @@ export default {
     padding-right: 10px;
     border-radius: 6px;
     background-color: #2a2a33;
+}
+
+.rd-chip-on {
+    flex-direction: row;
+    align-items: center;
+    height: 26px;
+    padding-left: 10px;
+    padding-right: 10px;
+    border-radius: 6px;
+    background-color: #4ade80;
 }
 
 .rd-chiptxt {
@@ -240,12 +505,19 @@ export default {
     margin-right: 10px;
 }
 
-.rd-body {
+.rd-scroll {
     flex: 1;
+}
+
+.rd-content {
     padding-left: 16px;
     padding-right: 16px;
     padding-top: 10px;
-    padding-bottom: 6px;
+    padding-bottom: 10px;
+}
+
+.rd-pageblock {
+    margin-bottom: 14px;
 }
 
 .rd-text {
@@ -258,42 +530,28 @@ export default {
     color: #6a6a78;
 }
 
+.rd-loading {
+    font-size: 15px;
+    color: #6a6a78;
+}
+
+.rd-end {
+    font-size: 15px;
+    color: #6a6a78;
+    margin-top: 8px;
+}
+
 .rd-foot {
     height: 48px;
     flex-direction: row;
     align-items: center;
     justify-content: center;
     background-color: #1e1e24;
-}
-
-.rd-btn {
-    flex-direction: row;
-    align-items: center;
-    height: 30px;
-    padding-left: 18px;
-    padding-right: 18px;
-    border-radius: 6px;
-    background-color: #2f5c8a;
-}
-
-.rd-btn-off {
-    flex-direction: row;
-    align-items: center;
-    height: 30px;
-    padding-left: 18px;
-    padding-right: 18px;
-    border-radius: 6px;
-    background-color: #2a2a33;
-}
-
-.rd-btntxt {
-    font-size: 14px;
-    color: #e8e8ee;
-}
-
-.rd-btntxt-off {
-    font-size: 14px;
-    color: #5a5a66;
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 10;
 }
 
 .rd-pageinfo {

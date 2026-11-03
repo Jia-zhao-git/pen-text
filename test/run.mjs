@@ -1,5 +1,5 @@
 // 纯函数回归入口（Node 直跑，不碰设备）。
-import { charWidth, splitParagraphs, wrapParagraph, paginate, locatePage, progressPercent } from '../src/lib/text.js'
+import { charWidth, splitParagraphs, wrapParagraph, paginate, renderPage, locatePage, progressPercent, normalizeText } from '../src/lib/text.js'
 import { titleFromName, newBookId, normalizeLibrary, upsertBook, bookAvailable } from '../src/lib/book.js'
 import { normalizeSettings, DEFAULT_SETTINGS } from '../src/lib/settings.js'
 import { normPath, mkdirChain } from '../src/lib/paths.js'
@@ -75,6 +75,36 @@ function eq(a, b, name) {
   eq(paginate('', {}), [], '空文本零页')
 }
 
+// ---------- 游标式 renderPage ----------
+{
+  const text = '一二三四五六七八九十'
+  const p1 = renderPage(text, { from: 0, charsPerLine: 4, linesPerPage: 2, indent: false })
+  eq(p1.start, 0, 'renderPage 首页偏移 0')
+  eq(p1.hasNext, true, '首页还有后续')
+  // 第一页 2 行 × 4 字 = 8 字，第二页从偏移 8 开始
+  const p2 = renderPage(text, { from: p1.end, charsPerLine: 4, linesPerPage: 2, indent: false })
+  eq(p2.start, 8, 'renderPage 第二页偏移 8')
+  eq(p2.hasNext, false, '末页无后续')
+  eq(p2.text, '九十', '末页剩余两字')
+}
+
+{
+  // 游标式与全量分页结果一致
+  const text = '一二三四五六七八九十'
+  const all = paginate(text, { charsPerLine: 4, linesPerPage: 2, indent: false })
+  const p1 = renderPage(text, { from: 0, charsPerLine: 4, linesPerPage: 2, indent: false })
+  eq(p1.text, all[0].text, '游标首页与全量第一页一致')
+  const p2 = renderPage(text, { from: p1.end, charsPerLine: 4, linesPerPage: 2, indent: false })
+  eq(p2.text, all[1].text, '游标末页与全量末页一致')
+}
+
+// ---------- normalizeText ----------
+{
+  eq(normalizeText('a\r\nb'), 'a\nb', 'CRLF 归一')
+  eq(normalizeText('a\rb'), 'a\nb', 'CR 归一')
+  eq(normalizeText('a\nb'), 'a\nb', '无 CR 原样返回')
+}
+
 // ---------- 定位页码 ----------
 {
   const text = '一二三四五六七八九十'
@@ -120,6 +150,15 @@ function eq(a, b, name) {
   eq(upd[0].progress, 50, '进度已更新')
   const add = upsertBook(lib, { id: 'x', path: '/p/x.txt', name: 'X' })
   eq(add.length, 2, '新书追加')
+}
+
+{
+  // 关键回归：id 为空（运行时只拿 path 存进度）也必须能匹配更新，不能重复新增
+  const lib = normalizeLibrary([{ id: 'a', path: '/p/a.txt', name: 'A', progress: 10 }])
+  const upd = upsertBook(lib, { id: '', path: '/p/a.txt', name: 'A', progress: 80 })
+  eq(upd.length, 1, '空 id 按 path 匹配不新增')
+  eq(upd[0].progress, 80, '空 id 也能更新进度')
+  eq(upd[0].id, 'a', '保留原 id')
 }
 
 {

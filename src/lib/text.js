@@ -4,24 +4,23 @@
 // <text> 由 flex-wrap 自然换行，但「自然换行」不产生稳定的分页边界 —— 滚动
 // 阅读时用户无法感知「看到第几页」，更没法记录进度、断点续读。
 //
-// 所以这里在逻辑层做**确定性分页**：按「全角字宽」估算折行，凑满 N 行就是一页。
-// 进度用「页首字符在原文的偏移」记录，改字号重新分页后仍能定位回原处。
+// 大书（几十 MB）的教训：一次性「读全文 + 分页全书」会生成几十万页的巨型数组，
+// 内存翻几百倍直接 abort 进程（本机 1GB + QuickJS）。所以提供两套 API：
+//   - renderPage：**游标式**，只折「当前页」这一小段，内存 O(一页)，供运行时用
+//   - paginate：一次性分全书，仅测试/小文本用
 //
-// 偏移是**字符级精确**的：段落被折成多行时，每行都记住自己在原文的起点，
-// 这样超长段落里翻页也能精确续读，而不是退回到段首。
+// 进度用「页首字符在原文的偏移」记录，改字号后仍能定位回原处。
 
 // 字符宽度估算：全角（CJK、全角标点）算 1，半角（ASCII、半角标点）算 0.5。
-// 与参考项目「全角 15px / 半角 8px」的实测结论同源，只是归一化到相对单位，
-// 让「每行放几个全角字」成为可读、可调的配置项。
 export function charWidth(ch) {
   if (ch === '\n' || ch === '\r') return 0
-  if (ch === '\t') return 2 // 一个 tab 展开成 4 个半角宽
+  if (ch === '\t') return 2
   const code = ch.codePointAt(0)
   if (code >= 0x2e80) return 1
   return 0.5
 }
 
-// 段落列表：{ text, start }，text 不含换行符，start 是该段首字符在全文的偏移。
+// 段落列表：{ text, start }（一次性用，测试用）
 export function splitParagraphs(text) {
   const s = String(text == null ? '' : text)
   const out = []
@@ -37,28 +36,19 @@ export function splitParagraphs(text) {
 }
 
 // 把一段文本按宽度折成若干行（纯视觉，返回字符串数组）。
-// 英文/数字单词保持完整，不硬拆；单词本身超长时才按字符切开。
 export function wrapParagraph(text, maxUnits) {
   const s = String(text == null ? '' : text)
   const lines = []
   let cur = ''
   let curW = 0
   let i = 0
-
   while (i < s.length) {
     const ch = s[i]
-
     if (/[A-Za-z0-9]/.test(ch)) {
-      // 整词取出
       let j = i, word = '', ww = 0
       while (j < s.length && /[A-Za-z0-9]/.test(s[j])) { word += s[j]; ww += charWidth(s[j]); j++ }
-      // 词放得下 → 直接并入
-      if (curW + ww <= maxUnits) {
-        cur += word; curW += ww; i = j; continue
-      }
-      // 放不下且行已有内容 → 换行
+      if (curW + ww <= maxUnits) { cur += word; curW += ww; i = j; continue }
       if (cur) { lines.push(cur); cur = ''; curW = 0; continue }
-      // 行空且词比整行还长 → 按字符硬切
       let part = '', pw = 0, k = i
       while (k < s.length && /[A-Za-z0-9]/.test(s[k]) && pw + charWidth(s[k]) <= maxUnits) {
         part += s[k]; pw += charWidth(s[k]); k++
@@ -67,7 +57,6 @@ export function wrapParagraph(text, maxUnits) {
       cur += part; curW += pw; i = k
       continue
     }
-
     const w = charWidth(ch)
     if (curW + w > maxUnits && cur) { lines.push(cur); cur = ''; curW = 0; continue }
     cur += ch; curW += w; i++
@@ -76,91 +65,115 @@ export function wrapParagraph(text, maxUnits) {
   return lines
 }
 
-// 分页主函数。
-//   text        全书文本（原始，可含 \r\n）
-//   charsPerLine  每行容纳的全角字数（宽度单位）
-//   linesPerPage  每页行数
-//   indent      段首是否缩进两个全角空格（中文阅读习惯，默认开）
-// 返回 [{ start, text }]，start 为该页在原文的**精确字符偏移**。
+// 从 offset 处读出一个逻辑行（到换行或行宽上限），返回 { text, next }。
+// next 是下一行的起始偏移（= 本行末尾字符之后、换行符之前）。
+function readLine(s, offset, maxUnits, indent) {
+  const n = s.length
+  let i = offset
+  let content = ''
+  let width = 0
+  let paraStart = true // 这一行是不是段落首行（决定缩进）
+
+  // 跳过行首的换行符（连续空行也吃掉，只保留段落间隙语义）
+  while (i < n && s[i] === '\n') { i++; paraStart = true }
+
+  while (i < n && s[i] !== '\n') {
+    const ch = s[i]
+    if (/[A-Za-z0-9]/.test(ch)) {
+      let k = i, word = '', ww = 0
+      while (k < n && /[A-Za-z0-9]/.test(s[k])) { word += s[k]; ww += charWidth(s[k]); k++ }
+      if (width + ww > maxUnits && width > 0) break
+      if (width + ww > maxUnits) {
+        let part = '', pw = 0, kk = i
+        while (kk < n && /[A-Za-z0-9]/.test(s[kk]) && pw + charWidth(s[kk]) <= maxUnits) {
+          part += s[kk]; pw += charWidth(s[kk]); kk++
+        }
+        if (!part) { part = s[kk]; kk++ }
+        content += part; width += pw; i = kk
+        continue
+      }
+      content += word; width += ww; i = k
+      continue
+    }
+    const w = charWidth(ch)
+    if (width + w > maxUnits && width > 0) break
+    content += ch; width += w; i++
+  }
+
+  const line = (paraStart && indent) ? '\u3000\u3000' + content : content
+  return { text: line, next: i }
+}
+
+// 归一化换行符：\r\n / \r → \n。只做一次，读入时调用；翻页路径不再重复。
+export function normalizeText(text) {
+  const s = text == null ? '' : String(text)
+  if (s.indexOf('\r') < 0) return s
+  return s.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+}
+
+// 游标式渲染一页：从 from 偏移开始，折出恰好 linesPerPage 行。
+// 返回 { start, end, text, hasNext }。
+//   start  本页首字符偏移
+//   end    下一页起始偏移（= 本页末行之后，可直接喂给下一次 renderPage）
+//   hasNext 是否还有后续内容
+// 注意：text 必须是已经 normalizeText 过的（换行只有 \n）。翻页高频调用，
+// 这里绝不再做 replace / 全量拷贝，否则大书每次翻页都要重跑一遍 O(n)。
+export function renderPage(text, opts) {
+  const o = opts || {}
+  const charsPerLine = o.charsPerLine || 46
+  const linesPerPage = o.linesPerPage || 10
+  const indent = o.indent !== false
+
+  const s = text == null ? '' : text
+  const n = s.length
+
+  let from = Number(o.from) || 0
+  if (from < 0) from = 0
+  if (from >= n) return { start: n, end: n, text: '', hasNext: false }
+
+  const lines = []
+  let cur = from
+  let start = -1
+
+  while (lines.length < linesPerPage && cur < n) {
+    // 页首记录：第一个非空行（或第一个逻辑行）的起点
+    if (start < 0) start = cur
+    const ln = readLine(s, cur, charsPerLine, indent)
+    lines.push(ln.text)
+    cur = ln.next
+    // 若这一行读完后停在换行符上，跳过它（否则下一行会先被 readLine 当空行处理）
+    if (cur < n && s[cur] === '\n') cur++
+  }
+
+  return {
+    start: start < 0 ? from : start,
+    end: cur,
+    text: lines.join('\n'),
+    hasNext: cur < n
+  }
+}
+
+// 一次性分全书（测试 / 小文本用，运行时别用这个对付大书）。
 export function paginate(text, opts) {
   const o = opts || {}
   const charsPerLine = o.charsPerLine || 46
   const linesPerPage = o.linesPerPage || 10
   const indent = o.indent !== false
 
-  const s = String(text == null ? '' : text)
-    .replace(/\r\n/g, '\n')
-    .replace(/\r/g, '\n')
-  const n = s.length
+  const s = normalizeText(text)
 
   const pages = []
-  let page = []
-  let pageStart = 0
-
-  const flush = () => {
-    if (page.length) pages.push({ start: pageStart, text: page.join('\n') })
-    page = []
+  let offset = 0
+  while (offset < s.length) {
+    const p = renderPage(s, { from: offset, charsPerLine, linesPerPage, indent })
+    pages.push({ start: p.start, text: p.text })
+    offset = p.end
+    if (offset >= s.length) break
   }
-
-  let i = 0
-  let paraStart = true // 当前位置是否是一个段落的开头（决定这一行要不要缩进）
-
-  while (i < n) {
-    if (s[i] === '\n') {
-      // 空行（段落分隔）：当前页尚有空间时补一个空行
-      i++
-      paraStart = true
-      if (page.length > 0 && page.length < linesPerPage) {
-        page.push('')
-        if (page.length >= linesPerPage) flush()
-      }
-      continue
-    }
-
-    // 逻辑行起点（记录精确偏移）
-    const lineStart = i
-    const isParaStart = paraStart
-    let content = ''
-    let width = 0
-
-    while (i < n && s[i] !== '\n') {
-      const ch = s[i]
-
-      if (/[A-Za-z0-9]/.test(ch)) {
-        let k = i, word = '', ww = 0
-        while (k < n && /[A-Za-z0-9]/.test(s[k])) { word += s[k]; ww += charWidth(s[k]); k++ }
-        if (width + ww > charsPerLine && width > 0) break // 词放不下 → 换行
-        if (width + ww > charsPerLine) {
-          // 行空且词比整行还长 → 硬切
-          let part = '', pw = 0, kk = i
-          while (kk < n && /[A-Za-z0-9]/.test(s[kk]) && pw + charWidth(s[kk]) <= charsPerLine) {
-            part += s[kk]; pw += charWidth(s[kk]); kk++
-          }
-          if (!part) { part = s[kk]; kk++ }
-          content += part; width += pw; i = kk
-          continue
-        }
-        content += word; width += ww; i = k
-        continue
-      }
-
-      const w = charWidth(ch)
-      if (width + w > charsPerLine && width > 0) break
-      content += ch; width += w; i++
-    }
-
-    // 段首缩进只加在这一段的第一行（折行续行不缩进）
-    const line = (isParaStart && indent) ? '\u3000\u3000' + content : content
-    if (page.length >= linesPerPage) flush()
-    if (page.length === 0) pageStart = lineStart
-    page.push(line)
-    paraStart = false
-  }
-  flush()
   return pages
 }
 
-// 给定当前进度偏移，返回它落在第几页（改字号后重新分页，用偏移找回页码）。
+// 给定当前进度偏移，返回它落在第几页（仅在 paginate 全量结果上定位）。
 export function locatePage(pages, offset) {
   if (!pages || !pages.length) return 0
   const o = Number(offset) || 0

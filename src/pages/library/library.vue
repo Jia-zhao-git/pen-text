@@ -23,7 +23,7 @@
 import { listBooks } from '../../services/books.js'
 import { loadLibrary, saveLibrary } from '../../services/store.js'
 import { titleFromName, upsertBook } from '../../lib/book.js'
-import { requestOpen } from '../../lib/session.js'
+import { publishOpen } from '../../lib/session.js'
 import { navTo, log } from '../../services/platform.js'
 
 export default {
@@ -64,7 +64,8 @@ export default {
             // 记住进度：这次打开的是第几本，方便下次「返回阅读」直接回来
             const next = upsertBook(this.lib, Object.assign({}, b, { updatedAt: Date.now() }))
             saveLibrary(next)
-            requestOpen(b.path)
+            // 广播 + 跳转：index 实例一直存活，靠订阅收到要打开的书
+            publishOpen(b.path)
             navTo('index', {})
         },
         backToRead() {

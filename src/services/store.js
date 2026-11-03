@@ -76,13 +76,15 @@ function scheduleVerify(expected, path) {
 // ---- 书架 ----
 
 export async function loadLibrary() {
-  if (!(await exists(p(F_LIBRARY)))) return []
+  if (_libLoaded) return _libCache
+  if (!(await exists(p(F_LIBRARY)))) { seedLibrary([]); return _libCache }
   const raw = await readText(p(F_LIBRARY), 3)
-  if (!raw) return []
+  if (!raw) { seedLibrary([]); return _libCache }
   try {
-    return normalizeLibrary(JSON.parse(raw))
+    return seedLibrary(JSON.parse(raw))
   } catch (e) {
-    return []
+    seedLibrary([])
+    return _libCache
   }
 }
 
@@ -92,13 +94,44 @@ export function saveLibrary(library) {
   return ok
 }
 
+// 内存书架缓存：进度保存是高频 + 退出时也要可靠落盘的操作，不能每次都
+// 异步读盘（onHide 时异步链来不及跑完就退出了）。loadLibrary 首次读盘后
+// 缓存，后续 saveBookProgress 直接基于缓存合并 + 同步写盘。
+let _libCache = null
+let _libLoaded = false
+
+export function hasLibraryCache() {
+  return _libLoaded
+}
+
+export function seedLibrary(lib) {
+  _libCache = normalizeLibrary(lib)
+  _libLoaded = true
+  return _libCache
+}
+
 // 保存单本书的进度（高频调用：翻页、退出都写）。
-// 先内存合并、再整体落盘；失败只记日志不打断阅读。
+// 若已有缓存则同步合并 + 同步写盘（onHide 可靠落盘的关键）；
+// 无缓存则先读盘再写（冷启动首次）。
 export function saveBookProgress(book) {
+  if (_libLoaded && _libCache !== null) {
+    try {
+      _libCache = upsertBook(_libCache, book)
+      const ok = saveLibrary(_libCache)
+      if (!ok) logLine('E', 'saveBookProgress 写盘失败 @ ' + p(F_LIBRARY))
+      return ok
+    } catch (e) {
+      logLine('E', 'saveBookProgress 失败 :: ' + (e && e.message ? e.message : e))
+      return false
+    }
+  }
+  // 冷启动首次：异步读盘后写入
   loadLibrary().then((lib) => {
-    const next = upsertBook(lib, book)
-    saveLibrary(next)
+    seedLibrary(lib)
+    _libCache = upsertBook(_libCache, book)
+    saveLibrary(_libCache)
   }).catch((e) => {
     logLine('E', 'saveBookProgress 失败 :: ' + (e && e.message ? e.message : e))
   })
+  return false
 }
