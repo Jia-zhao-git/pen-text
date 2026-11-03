@@ -1,0 +1,33 @@
+# 依赖
+node_modules/
+
+# 构建产物（<appid>.<版本>.amr 是安装包，二进制，不入库）
+*.amr
+*.js.bin
+dist/
+build/
+.cwp/
+.qjsc/
+.falcon_/
+
+# 真机调试过程留存：截图 + 会话/设置快照（含 API Key，绝不能入库）
+.shots/
+
+# 本地日志与临时文件
+*.log
+.tmp/
+tmp/
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# 真机调试时可能落下的本地数据（含 API Key 与会话记录，绝不入库）
+settings.json
+chats.json
+balance.json
+holiday.json
+library.json
+books/

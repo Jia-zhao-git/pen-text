@@ -1,0 +1,7 @@
+{
+  "pages": {
+    "index": "pages/index/index.vue",
+    "library": "pages/library/library.vue",
+    "settings": "pages/settings/settings.vue"
+  }
+}
