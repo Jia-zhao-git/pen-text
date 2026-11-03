@@ -106,9 +106,11 @@ export default {
         this.boot()
     },
     unmounted() {
+        this.saveProgress()
         if (this.unsubOpen) { this.unsubOpen(); this.unsubOpen = null }
         this.stopAutoScroll()
         if (this.hideTimer) clearTimeout(this.hideTimer)
+        if (this._saveTimer) clearTimeout(this._saveTimer)
     },
     onShow() {
         this.reloadSettings()
@@ -260,17 +262,25 @@ export default {
             const lines = s.linesPerPage || 10
             const gap = 14
             const pageH = lineH * lines + gap
-            // 可视区顶部落在哪个页块（offsetY 是相对内容顶的滚动量）
             let idx = Math.floor((offsetY + pageH * 0.5) / pageH)
             if (idx < 0) idx = 0
             if (idx >= this.renderedPages.length) idx = this.renderedPages.length - 1
             const page = this.renderedPages[idx]
             if (!page) return
-            // 只在真正前进时更新（单调，避免回滚写 data）
             if (page.chunkIdx !== this.progressChunk || page.start !== this.progressOffset) {
                 this.progressChunk = page.chunkIdx
                 this.progressOffset = page.start
+                // 滚动时实时节流保存，不依赖 onHide（本固件退出时页面 onHide 不触发）
+                this.scheduleSaveProgress()
             }
+        },
+        scheduleSaveProgress() {
+            if (this._saveTimer) return
+            const self = this
+            this._saveTimer = setTimeout(() => {
+                self._saveTimer = null
+                self.saveProgress()
+            }, 800)
         },
         saveProgress() {
             if (!this.book) return
