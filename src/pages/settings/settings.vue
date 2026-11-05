@@ -50,6 +50,15 @@
                 <text :class="indentClass">{{ indentLabel }}</text>
             </div>
 
+            <!-- 自动滚动速度 -->
+            <div class="st-sec">
+                <text class="st-label">自动滚动速度 {{ settings.autoScrollSpeed }}px/s</text>
+                <div class="st-stepper">
+                    <div class="st-step" @click="step('autoScrollSpeed', -2)"><text class="st-steptxt">−</text></div>
+                    <div class="st-step" @click="step('autoScrollSpeed', 2)"><text class="st-steptxt">＋</text></div>
+                </div>
+            </div>
+
             <!-- 主题 -->
             <div class="st-sec">
                 <text class="st-label">配色主题</text>

@@ -8,6 +8,7 @@ export const DEFAULT_SETTINGS = {
   lineHeight: 26,     // 行高（px）
   indent: true,       // 段首缩进两格
   theme: 'dark',      // dark / light / sepia（羊皮纸）
+  autoScrollSpeed: 5, // 自动滚动速度（像素/秒），范围 1-50
   updatedAt: 0
 }
 
@@ -30,6 +31,7 @@ export function normalizeSettings(raw) {
     lineHeight: num(s.lineHeight, d.lineHeight, 18, 48),
     indent: s.indent !== false,
     theme: (s.theme === 'light' || s.theme === 'sepia') ? s.theme : 'dark',
+    autoScrollSpeed: num(s.autoScrollSpeed, d.autoScrollSpeed, 1, 50),
     updatedAt: Number(s.updatedAt) || 0
   }
 }

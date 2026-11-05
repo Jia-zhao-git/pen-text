@@ -1,6 +1,6 @@
 {
   "name": "pen-text",
-  "version": "0.1.20",
+  "version": "0.1.25",
   "private": true,
   "description": "词典笔 TXT 阅读器（HaaS UI / Falcon 小程序）",
   "appid": "8000000000182400",

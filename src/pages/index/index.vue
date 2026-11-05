@@ -45,6 +45,7 @@ import { renderPage, normalizeText, progressPercent } from '../../lib/text.js'
 import { titleFromName } from '../../lib/book.js'
 import { subscribeOpen, consumeOpen } from '../../lib/session.js'
 import { saveBookProgress, loadLibrary } from '../../services/store.js'
+import { subscribeUiState } from '../../lib/uistate.js'
 import { openReader, readChunk, chunkIndexForLine, lineStartOfChunk } from '../../services/reader.js'
 
 const INITIAL_CHUNKS = 2
@@ -103,11 +104,16 @@ export default {
         this.unsubOpen = subscribeOpen((path) => {
             if (path) this.openBook(path)
         })
+        // 订阅设置广播：设置页改速度等参数后立即同步（固件返回不触发 onShow）
+        this.unsubUi = subscribeUiState((s) => {
+            if (s && s.settings) this.applySettings(s.settings)
+        })
         this.boot()
     },
     unmounted() {
         this.saveProgress()
         if (this.unsubOpen) { this.unsubOpen(); this.unsubOpen = null }
+        if (this.unsubUi) { this.unsubUi(); this.unsubUi = null }
         this.stopAutoScroll()
         if (this.hideTimer) clearTimeout(this.hideTimer)
         if (this._saveTimer) clearTimeout(this._saveTimer)
@@ -248,6 +254,8 @@ export default {
         onScroll(e) {
             const offsetY = e && e.contentOffset ? Math.abs(e.contentOffset.y || 0) : 0
             const size = e && e.contentSize ? e.contentSize.height : 0
+            this._lastOffset = offsetY
+            this._lastSize = size
             if (this.atEnd === false && size > 0 && offsetY + 320 >= size) {
                 this.appendNext()
             }
@@ -324,78 +332,41 @@ export default {
         startAutoScroll() {
             this.autoScroll = true
             this.scheduleHide()
-            // 探测 scroller 实例是否支持 scrollTop 像素滚动
-            this._pixelScroll = this.probeScrollTop()
+            // 像素滚动：用 scrollToElement 到顶部锚点 + 递增 offset 实现平滑滚动
+            // （真机 scroller 无 scrollTop 属性，但 scrollToElement 支持像素 offset）
+            this._autoOffset = this._lastOffset || 0
             const self = this
-            // 像素滚动用中等帧率小步进；逐页回退用慢节奏
-            const interval = this._pixelScroll ? 100 : 900
             this.autoTimer = setInterval(() => {
-                self.autoScrollTick()
-            }, interval)
+                self.pixelScrollStep()
+            }, this.pixelInterval())
         },
-        probeScrollTop() {
-            try {
-                const sc = this.$refs.scroller
-                // 组件实例或其 $el 上找 scrollTop
-                const inst = sc && sc.$el ? sc.$el : sc
-                return inst && (typeof inst.scrollTop === 'number' || inst.scrollTop !== undefined)
-            } catch (e) { return false }
+        // 自动滚动：固定 200ms 间隔，步进随速度值（px/s）变化
+        pixelInterval() {
+            return 200
         },
-        autoScrollTick() {
-            if (!this.autoScroll) return
-            if (this._pixelScroll) {
-                this.pixelScrollStep()
-            } else {
-                this.pageScrollStep()
-            }
+        pixelStep() {
+            const sp = (this.settings && this.settings.autoScrollSpeed) || 5
+            // 速度 sp px/s → 每 200ms 步进 sp*0.2 px（至少 1px）
+            return Math.max(1, Math.round(sp * 0.2))
         },
-        // 像素平滑滚动：直接递增 scrollTop（每 tick 2px，50ms → 40px/s）
+        // 像素平滑滚动：scrollToElement 到「顶部锚点 + 递增 offset」
         pixelScrollStep() {
-            try {
-                const sc = this.$refs.scroller
-                const inst = sc && sc.$el ? sc.$el : sc
-                if (!inst || typeof inst.scrollTop !== 'number') {
-                    this._pixelScroll = false
-                    return
-                }
-                inst.scrollTop = inst.scrollTop + 1
-                // 到底就加载下一块
-                if (this.atEnd === false && inst.scrollTop + 340 >= inst.scrollHeight) {
-                    this.appendNext()
-                }
-                // 真到末尾（无更多块且滚到底）停止
-                if (this.atEnd && inst.scrollTop + 20 >= inst.scrollHeight) {
-                    this.stopAutoScroll()
-                }
-                // 同步进度到当前可视页
-                this.trackVisiblePage(inst.scrollTop)
-            } catch (e) { /* 忽略 */ }
-        },
-        // 逐页回退：滚到下一个 pageblock
-        pageScrollStep() {
-            if (this.autoPage >= this.renderedPages.length - 1) {
-                if (this.atEnd) {
-                    this.stopAutoScroll()
-                    return
-                }
+            if (!this.autoScroll) return
+            this._autoOffset = (this._autoOffset || 0) + this.pixelStep()
+            this.scrollToOffset(this._autoOffset)
+            this.trackVisiblePage(this._autoOffset)
+            const size = this._lastSize || 0
+            if (this.atEnd === false && size > 0 && this._autoOffset + 340 >= size) {
                 this.appendNext()
-                return
+            } else if (this.atEnd && size > 0 && this._autoOffset + 20 >= size) {
+                this.stopAutoScroll()
             }
-            this.autoPage++
-            this.scrollToPage(this.autoPage)
-            const page = this.renderedPages[this.autoPage]
-            if (page) {
-                this.progressChunk = page.chunkIdx
-                this.progressOffset = page.start
-            }
-            this.saveProgress()
         },
-        scrollToPage(index) {
+        scrollToOffset(offset) {
             try {
-                const refs = this.$refs['pb_' + index]
-                const el = Array.isArray(refs) ? refs[0] : refs
+                const el = this.$refs.top
                 if (el && this.$page && this.$page.$dom && this.$page.$dom.scrollToElement) {
-                    this.$page.$dom.scrollToElement(el, { offset: 0, animated: true })
+                    this.$page.$dom.scrollToElement(el, { offset: offset, animated: false })
                 }
             } catch (e) { /* 忽略 */ }
         },
